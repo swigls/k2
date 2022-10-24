@@ -330,6 +330,7 @@ def get_rnnt_logprobs_joint(
     termination_symbol: int,
     rnnt_type: str = "regular",
     boundary: Optional[Tensor] = None,
+    py_add: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor]:
     """Reduces RNN-T problem to a compact, standard form that can then be given
     (with boundaries) to mutual_information_recursion().
@@ -363,6 +364,9 @@ def get_rnnt_logprobs_joint(
                        *next* context on the *current* frame, e.g. if we emit
                        c given "a b" context, we are forced to emit "blank"
                        given "b c" context on the current frame.
+      py_add:
+        Additional log prob to be added to py after normalization, 
+        with shape (B, T, S + 1). It is used for joint streaming RNN-T
     Returns:
       (px, py) (the names are quite arbitrary)::
 
@@ -426,6 +430,8 @@ def get_rnnt_logprobs_joint(
     )  # [B][S+1][T]
     py -= normalizers
 
+    py += py_add.permute(0,2,1)  # NOTE: maybe inplace operation does not work
+
     if rnnt_type == "regular":
         px = fix_for_boundary(px, boundary)
     elif rnnt_type == "constrained":
@@ -442,6 +448,7 @@ def rnnt_loss(
     rnnt_type: str = "regular",
     delay_penalty: float = 0.0,
     reduction: Optional[str] = "mean",
+    py_add: Optional[Tensor] = None,
 ) -> Tensor:
     """A normal RNN-T loss, which uses a 'joiner' network output as input,
     i.e. a 4 dimensions tensor.
@@ -483,7 +490,9 @@ def rnnt_loss(
         `mean`: apply `torch.mean` over the batches.
         `sum`: the output will be summed.
         Default: `mean`
-
+      py_add:
+        Additional log prob to be added to py after normalization, 
+        with shape (B, T, S + 1). It is used for joint streaming RNN-T
     Returns:
       If recursion is `none`, returns a tensor of shape (B,), containing the
       total RNN-T loss values for each element of the batch, otherwise a scalar
@@ -495,6 +504,7 @@ def rnnt_loss(
         termination_symbol=termination_symbol,
         boundary=boundary,
         rnnt_type=rnnt_type,
+        py_add=py_add,
     )
 
     if delay_penalty > 0.0:
