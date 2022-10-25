@@ -430,7 +430,8 @@ def get_rnnt_logprobs_joint(
     )  # [B][S+1][T]
     py -= normalizers
 
-    py += py_add.permute(0,2,1)  # NOTE: maybe inplace operation does not work
+    if py_add is not None:
+        py += py_add.permute(0,2,1)  # NOTE: maybe inplace operation does not work
 
     if rnnt_type == "regular":
         px = fix_for_boundary(px, boundary)
