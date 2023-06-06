@@ -321,6 +321,128 @@ def rnnt_loss_simple(
         )
     return (loss, scores_and_grads[1]) if return_grad else loss
 
+def get_hat_logprobs_joint(
+    logits: Tensor,
+    symbols: Tensor,
+    termination_symbol: int,
+    hat_type: str = "regular",
+    boundary: Optional[Tensor] = None,
+    px_denom_add: Optional[Tensor] = None,
+) -> Tuple[Tensor, Tensor]:
+    """Reduces RNN-T problem to a compact, standard form that can then be given
+    (with boundaries) to mutual_information_recursion().
+    This function is called from rnnt_loss().
+
+    Args:
+      logits:
+        The output of joiner network, with shape (B, T, S + 1, C),
+        i.e. batch, time_seq_len, symbol_seq_len+1, num_classes
+      symbols:
+        A LongTensor of shape [B][S], containing the symbols at each position
+        of the sequence.
+      termination_symbol:
+        The identity of the termination symbol, must be in {0..C-1}
+      boundary:
+        a optional LongTensor of shape [B, 4] with elements interpreted as
+        [begin_symbol, begin_frame, end_symbol, end_frame] that is treated as
+        [0, 0, S, T]
+        if boundary is not supplied.
+        Most likely you will want begin_symbol and begin_frame to be zero.
+      hat_type:
+        Specifies the type of rnnt paths: `regular`, `modified` or `constrained`.
+        `regular`: The regular rnnt that taking you to the next frame only if
+                   emitting a blank (i.e., emitting a symbol does not take you
+                   to the next frame).
+        `modified`: A modified version of rnnt that will take you to the next
+                    frame either emitting a blank or a non-blank symbol.
+        `constrained`: A version likes the modified one that will go to the next
+                       frame when you emit a non-blank symbol, but this is done
+                       by "forcing" you to take the blank transition from the
+                       *next* context on the *current* frame, e.g. if we emit
+                       c given "a b" context, we are forced to emit "blank"
+                       given "b c" context on the current frame.
+      px_denom_add:
+        A optional tensor of shape [B, S+1, C-1], containing the denominator
+        coefficient for each BPE unit. 
+    Returns:
+      (px, py) (the names are quite arbitrary)::
+
+          px: logprobs, of shape [B][S][T+1] if hat_type is regular,
+                                 [B][S][T] if hat_type is not regular.
+          py: logprobs, of shape [B][S+1][T]
+
+      in the recursion::
+
+         p[b,0,0] = 0.0
+         if hat_type == "regular":
+            p[b,s,t] = log_add(p[b,s-1,t] + px[b,s-1,t],
+                               p[b,s,t-1] + py[b,s,t-1])
+         if hat_type != "regular":
+            p[b,s,t] = log_add(p[b,s-1,t-1] + px[b,s-1,t-1],
+                               p[b,s,t-1] + py[b,s,t-1])
+
+      .. where p[b][s][t] is the "joint score" of the pair of subsequences of
+      length s and t respectively.  px[b][s][t] represents the probability of
+      extending the subsequences of length (s,t) by one in the s direction,
+      given the particular symbol, and py[b][s][t] represents the probability
+      of extending the subsequences of length (s,t) by one in the t direction,
+      i.e. of emitting the termination/next-frame symbol.
+
+      if `rnnt_type == "regular"`, px[:,:,T] equals -infinity, meaning on the
+      "one-past-the-last" frame we cannot emit any symbols.
+      This is simply a way of incorporating
+      the probability of the termination symbol on the last frame.
+    """
+    assert logits.ndim == 4, logits.shape
+    (B, T, S1, C) = logits.shape
+    S = S1 - 1
+    assert symbols.shape == (B, S), (symbols.shape, B, S)
+    assert S >= 0, S
+    assert (
+        hat_type != "modified" or T >= S
+    ), f"Modified transducer requires T >= S, but got T={T} and S={S}"
+    assert hat_type in ["regular", "modified", "constrained"], hat_type
+
+    #normalizers = torch.logsumexp(logits, dim=3)  # (B, T, S+1, C)
+    assert termination_symbol == 0, termination_symbol
+    px_denom_scores = logits[:, :, :, 1:]  # (B, T, S+1, C-1)
+    if px_denom_add is not None:
+        assert px_denom_add.shape == (B, S+1, C-1)
+        px_denom_scores = px_denom_scores + px_denom_add.unsqueeze(1)
+    
+    normalizers = torch.logsumexp(px_denom_scores, dim=3)  # (B, T, S+1, C)
+    normalizers = normalizers.permute((0, 2, 1))  # (B, S+1, T)
+
+    px = torch.gather(
+        logits, dim=3, index=symbols.reshape(B, 1, S, 1).expand(B, T, S, 1)
+    ).squeeze(-1)
+    px = px.permute((0, 2, 1))  # (B, S, T)
+
+    if hat_type == "regular":
+        px = torch.cat(
+            (
+                px,
+                torch.full(
+                    (B, S, 1), float("-inf"), device=px.device, dtype=px.dtype
+                ),
+            ),
+            dim=2,
+        )  # now: [B][S][T+1], index [:,:,T] has -inf..
+
+    px[:, :, :T] -= normalizers[:, :S, :]  # (B, S, T+1)
+
+    py = (
+        logits[:, :, :, termination_symbol].permute((0, 2, 1)).clone()
+    )  # [B][S+1][T]
+    #py -= normalizers
+    py = torch.nn.functional.logsigmoid(py)
+
+    if hat_type == "regular":
+        px = fix_for_boundary(px, boundary)
+    elif hat_type == "constrained":
+        px += py[:, 1:, :]
+
+    return (px, py)
 
 def get_rnnt_logprobs_joint(
     logits: Tensor,
@@ -433,6 +555,102 @@ def get_rnnt_logprobs_joint(
 
     return (px, py)
 
+def hat_loss(
+    logits: Tensor,
+    symbols: Tensor,
+    termination_symbol: int,
+    boundary: Optional[Tensor] = None,
+    hat_type: str = "regular",
+    delay_penalty: float = 0.0,
+    reduction: Optional[str] = "mean",
+    px_denom_add: Optional[Tensor] = None,
+) -> Tensor:
+    """A normal RNN-T loss, which uses a 'joiner' network output as input,
+    i.e. a 4 dimensions tensor.
+
+    Args:
+      logits:
+        The output of joiner network, with shape (B, T, S + 1, C),
+        i.e. batch, time_seq_len, symbol_seq_len+1, num_classes
+      symbols:
+        The symbol sequences, a LongTensor of shape [B][S], and elements
+        in {0..C-1}.
+      termination_symbol:
+        the termination symbol, with 0 <= termination_symbol < C
+      boundary:
+        a optional LongTensor of shape [B, 4] with elements interpreted as
+        [begin_symbol, begin_frame, end_symbol, end_frame] that is treated as
+        [0, 0, S, T] if boundary is not supplied.
+        Most likely you will want begin_symbol and begin_frame to be zero.
+      hat_type:
+        Specifies the type of rnnt paths: `regular`, `modified` or `constrained`.
+        `regular`: The regular rnnt that taking you to the next frame only if
+                   emitting a blank (i.e., emitting a symbol does not take you
+                   to the next frame).
+        `modified`: A modified version of rnnt that will take you to the next
+                    frame either emitting a blank or a non-blank symbol.
+        `constrained`: A version likes the modified one that will go to the next
+                       frame when you emit a non-blank symbol, but this is done
+                       by "forcing" you to take the blank transition from the
+                       *next* context on the *current* frame, e.g. if we emit
+                       c given "a b" context, we are forced to emit "blank"
+                       given "b c" context on the current frame.
+      delay_penalty: A constant value to penalize symbol delay, this may be
+         needed when training with time masking, to avoid the time-masking
+         encouraging the network to delay symbols.
+         See https://github.com/k2-fsa/k2/issues/955 for more details.
+      reduction:
+        Specifies the reduction to apply to the output: `none`, `mean` or `sum`.
+        `none`: no reduction will be applied.
+        `mean`: apply `torch.mean` over the batches.
+        `sum`: the output will be summed.
+        Default: `mean`
+      px_denom_add:
+        A tensor of shape (B, S+1, C-1) that will be BPE unit-wise added to the 
+        denominator of px.
+
+    Returns:
+      If recursion is `none`, returns a tensor of shape (B,), containing the
+      total HAT loss values for each element of the batch, otherwise a scalar
+      with the reduction applied.
+    """
+    px, py = get_hat_logprobs_joint(
+        logits=logits,
+        symbols=symbols,
+        termination_symbol=termination_symbol,
+        boundary=boundary,
+        hat_type=hat_type,
+        px_denom_add=px_denom_add,
+    )
+
+    if delay_penalty > 0.0:
+        B, S, T0 = px.shape
+        T = T0 if hat_type != "regular" else T0 - 1
+        if boundary is None:
+            offset = torch.tensor(
+                (T - 1) / 2,
+                dtype=px.dtype,
+                device=px.device,
+            ).expand(B, 1, 1)
+        else:
+            offset = (boundary[:, 3] - 1) / 2
+        penalty = offset.reshape(B, 1, 1) - torch.arange(
+            T0, device=px.device
+        ).reshape(1, 1, T0)
+        penalty = penalty * delay_penalty
+        px += penalty.to(px.dtype)
+
+    negated_loss = mutual_information_recursion(px=px, py=py, boundary=boundary)
+    if reduction == "none":
+        return -negated_loss
+    elif reduction == "mean":
+        return -torch.mean(negated_loss)
+    elif reduction == "sum":
+        return -torch.sum(negated_loss)
+    else:
+        raise ValueError(
+            f"reduction should be ('none' | 'mean' | 'sum'), given {reduction}"
+        )
 
 def rnnt_loss(
     logits: Tensor,
