@@ -450,6 +450,8 @@ def get_rnnt_logprobs_joint(
     termination_symbol: int,
     rnnt_type: str = "regular",
     boundary: Optional[Tensor] = None,
+    blank_sigmoid: bool = False,
+    denom_lm_logp: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor]:
     """Reduces RNN-T problem to a compact, standard form that can then be given
     (with boundaries) to mutual_information_recursion().
@@ -470,6 +472,12 @@ def get_rnnt_logprobs_joint(
         [0, 0, S, T]
         if boundary is not supplied.
         Most likely you will want begin_symbol and begin_frame to be zero.
+      blank_sigmoid:
+        If true, the blank symbol is separately modeled with sigmoid activation.
+      denom_lm:
+        If supplied, a tensor of shape [B, T, S+1] containing the log
+        probabilities of the language model, which will be added to the
+        log probabilities of the RNN-T for each symbol at the denominator.
       rnnt_type:
         Specifies the type of rnnt paths: `regular`, `modified` or `constrained`.
         `regular`: The regular rnnt that taking you to the next frame only if
@@ -522,6 +530,16 @@ def get_rnnt_logprobs_joint(
     ), f"Modified transducer requires T >= S, but got T={T} and S={S}"
     assert rnnt_type in ["regular", "modified", "constrained"], rnnt_type
 
+    if blank_sigmoid:
+        assert termination_symbol == 0, termination_symbol
+        blank_logit = logits[:, :, :, 0]  # (B, T, S+1)
+        logits = logits[:, :, :, 1:]  # (B, T, S+1, C-1)
+        if denom_lm_logp is not None:
+            assert denom_lm_logp.shape == (B, S+1, C-1)
+            logits = logits + denom_lm_logp.unsqueeze(1)
+    else:
+        blank_logit = logits[:, :, :, termination_symbol]  # (B, T, S+1)
+
     normalizers = torch.logsumexp(logits, dim=3)
     normalizers = normalizers.permute((0, 2, 1))
 
@@ -543,10 +561,11 @@ def get_rnnt_logprobs_joint(
 
     px[:, :, :T] -= normalizers[:, :S, :]
 
-    py = (
-        logits[:, :, :, termination_symbol].permute((0, 2, 1)).clone()
-    )  # [B][S+1][T]
-    py -= normalizers
+    py = blank_logit.permute((0, 2, 1)).clone()  # [B][S+1][T]
+    if blank_sigmoid:
+        py = torch.nn.functional.logsigmoid(py)
+    else:
+        py -= normalizers
 
     if rnnt_type == "regular":
         px = fix_for_boundary(px, boundary)
@@ -554,103 +573,6 @@ def get_rnnt_logprobs_joint(
         px += py[:, 1:, :]
 
     return (px, py)
-
-def hat_loss(
-    logits: Tensor,
-    symbols: Tensor,
-    termination_symbol: int,
-    boundary: Optional[Tensor] = None,
-    hat_type: str = "regular",
-    delay_penalty: float = 0.0,
-    reduction: Optional[str] = "mean",
-    px_denom_add: Optional[Tensor] = None,
-) -> Tensor:
-    """A normal RNN-T loss, which uses a 'joiner' network output as input,
-    i.e. a 4 dimensions tensor.
-
-    Args:
-      logits:
-        The output of joiner network, with shape (B, T, S + 1, C),
-        i.e. batch, time_seq_len, symbol_seq_len+1, num_classes
-      symbols:
-        The symbol sequences, a LongTensor of shape [B][S], and elements
-        in {0..C-1}.
-      termination_symbol:
-        the termination symbol, with 0 <= termination_symbol < C
-      boundary:
-        a optional LongTensor of shape [B, 4] with elements interpreted as
-        [begin_symbol, begin_frame, end_symbol, end_frame] that is treated as
-        [0, 0, S, T] if boundary is not supplied.
-        Most likely you will want begin_symbol and begin_frame to be zero.
-      hat_type:
-        Specifies the type of rnnt paths: `regular`, `modified` or `constrained`.
-        `regular`: The regular rnnt that taking you to the next frame only if
-                   emitting a blank (i.e., emitting a symbol does not take you
-                   to the next frame).
-        `modified`: A modified version of rnnt that will take you to the next
-                    frame either emitting a blank or a non-blank symbol.
-        `constrained`: A version likes the modified one that will go to the next
-                       frame when you emit a non-blank symbol, but this is done
-                       by "forcing" you to take the blank transition from the
-                       *next* context on the *current* frame, e.g. if we emit
-                       c given "a b" context, we are forced to emit "blank"
-                       given "b c" context on the current frame.
-      delay_penalty: A constant value to penalize symbol delay, this may be
-         needed when training with time masking, to avoid the time-masking
-         encouraging the network to delay symbols.
-         See https://github.com/k2-fsa/k2/issues/955 for more details.
-      reduction:
-        Specifies the reduction to apply to the output: `none`, `mean` or `sum`.
-        `none`: no reduction will be applied.
-        `mean`: apply `torch.mean` over the batches.
-        `sum`: the output will be summed.
-        Default: `mean`
-      px_denom_add:
-        A tensor of shape (B, S+1, C-1) that will be BPE unit-wise added to the 
-        denominator of px.
-
-    Returns:
-      If recursion is `none`, returns a tensor of shape (B,), containing the
-      total HAT loss values for each element of the batch, otherwise a scalar
-      with the reduction applied.
-    """
-    px, py = get_hat_logprobs_joint(
-        logits=logits,
-        symbols=symbols,
-        termination_symbol=termination_symbol,
-        boundary=boundary,
-        hat_type=hat_type,
-        px_denom_add=px_denom_add,
-    )
-
-    if delay_penalty > 0.0:
-        B, S, T0 = px.shape
-        T = T0 if hat_type != "regular" else T0 - 1
-        if boundary is None:
-            offset = torch.tensor(
-                (T - 1) / 2,
-                dtype=px.dtype,
-                device=px.device,
-            ).expand(B, 1, 1)
-        else:
-            offset = (boundary[:, 3] - 1) / 2
-        penalty = offset.reshape(B, 1, 1) - torch.arange(
-            T0, device=px.device
-        ).reshape(1, 1, T0)
-        penalty = penalty * delay_penalty
-        px += penalty.to(px.dtype)
-
-    negated_loss = mutual_information_recursion(px=px, py=py, boundary=boundary)
-    if reduction == "none":
-        return -negated_loss
-    elif reduction == "mean":
-        return -torch.mean(negated_loss)
-    elif reduction == "sum":
-        return -torch.sum(negated_loss)
-    else:
-        raise ValueError(
-            f"reduction should be ('none' | 'mean' | 'sum'), given {reduction}"
-        )
 
 def rnnt_loss(
     logits: Tensor,
@@ -660,6 +582,8 @@ def rnnt_loss(
     rnnt_type: str = "regular",
     delay_penalty: float = 0.0,
     reduction: Optional[str] = "mean",
+    blank_sigmoid: bool = False,
+    denom_lm_logp: Optional[Tensor] = None,
 ) -> Tensor:
     """A normal RNN-T loss, which uses a 'joiner' network output as input,
     i.e. a 4 dimensions tensor.
@@ -713,6 +637,8 @@ def rnnt_loss(
         termination_symbol=termination_symbol,
         boundary=boundary,
         rnnt_type=rnnt_type,
+        blank_sigmoid=blank_sigmoid,
+        denom_lm_logp=denom_lm_logp,
     )
 
     if delay_penalty > 0.0:
