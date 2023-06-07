@@ -321,129 +321,6 @@ def rnnt_loss_simple(
         )
     return (loss, scores_and_grads[1]) if return_grad else loss
 
-def get_hat_logprobs_joint(
-    logits: Tensor,
-    symbols: Tensor,
-    termination_symbol: int,
-    hat_type: str = "regular",
-    boundary: Optional[Tensor] = None,
-    px_denom_add: Optional[Tensor] = None,
-) -> Tuple[Tensor, Tensor]:
-    """Reduces RNN-T problem to a compact, standard form that can then be given
-    (with boundaries) to mutual_information_recursion().
-    This function is called from rnnt_loss().
-
-    Args:
-      logits:
-        The output of joiner network, with shape (B, T, S + 1, C),
-        i.e. batch, time_seq_len, symbol_seq_len+1, num_classes
-      symbols:
-        A LongTensor of shape [B][S], containing the symbols at each position
-        of the sequence.
-      termination_symbol:
-        The identity of the termination symbol, must be in {0..C-1}
-      boundary:
-        a optional LongTensor of shape [B, 4] with elements interpreted as
-        [begin_symbol, begin_frame, end_symbol, end_frame] that is treated as
-        [0, 0, S, T]
-        if boundary is not supplied.
-        Most likely you will want begin_symbol and begin_frame to be zero.
-      hat_type:
-        Specifies the type of rnnt paths: `regular`, `modified` or `constrained`.
-        `regular`: The regular rnnt that taking you to the next frame only if
-                   emitting a blank (i.e., emitting a symbol does not take you
-                   to the next frame).
-        `modified`: A modified version of rnnt that will take you to the next
-                    frame either emitting a blank or a non-blank symbol.
-        `constrained`: A version likes the modified one that will go to the next
-                       frame when you emit a non-blank symbol, but this is done
-                       by "forcing" you to take the blank transition from the
-                       *next* context on the *current* frame, e.g. if we emit
-                       c given "a b" context, we are forced to emit "blank"
-                       given "b c" context on the current frame.
-      px_denom_add:
-        A optional tensor of shape [B, S+1, C-1], containing the denominator
-        coefficient for each BPE unit. 
-    Returns:
-      (px, py) (the names are quite arbitrary)::
-
-          px: logprobs, of shape [B][S][T+1] if hat_type is regular,
-                                 [B][S][T] if hat_type is not regular.
-          py: logprobs, of shape [B][S+1][T]
-
-      in the recursion::
-
-         p[b,0,0] = 0.0
-         if hat_type == "regular":
-            p[b,s,t] = log_add(p[b,s-1,t] + px[b,s-1,t],
-                               p[b,s,t-1] + py[b,s,t-1])
-         if hat_type != "regular":
-            p[b,s,t] = log_add(p[b,s-1,t-1] + px[b,s-1,t-1],
-                               p[b,s,t-1] + py[b,s,t-1])
-
-      .. where p[b][s][t] is the "joint score" of the pair of subsequences of
-      length s and t respectively.  px[b][s][t] represents the probability of
-      extending the subsequences of length (s,t) by one in the s direction,
-      given the particular symbol, and py[b][s][t] represents the probability
-      of extending the subsequences of length (s,t) by one in the t direction,
-      i.e. of emitting the termination/next-frame symbol.
-
-      if `rnnt_type == "regular"`, px[:,:,T] equals -infinity, meaning on the
-      "one-past-the-last" frame we cannot emit any symbols.
-      This is simply a way of incorporating
-      the probability of the termination symbol on the last frame.
-    """
-    assert logits.ndim == 4, logits.shape
-    (B, T, S1, C) = logits.shape
-    S = S1 - 1
-    assert symbols.shape == (B, S), (symbols.shape, B, S)
-    assert S >= 0, S
-    assert (
-        hat_type != "modified" or T >= S
-    ), f"Modified transducer requires T >= S, but got T={T} and S={S}"
-    assert hat_type in ["regular", "modified", "constrained"], hat_type
-
-    #normalizers = torch.logsumexp(logits, dim=3)  # (B, T, S+1, C)
-    assert termination_symbol == 0, termination_symbol
-    px_denom_scores = logits[:, :, :, 1:]  # (B, T, S+1, C-1)
-    if px_denom_add is not None:
-        assert px_denom_add.shape == (B, S+1, C-1)
-        px_denom_scores = px_denom_scores + px_denom_add.unsqueeze(1)
-    
-    normalizers = torch.logsumexp(px_denom_scores, dim=3)  # (B, T, S+1, C)
-    normalizers = normalizers.permute((0, 2, 1))  # (B, S+1, T)
-
-    px = torch.gather(
-        logits, dim=3, index=symbols.reshape(B, 1, S, 1).expand(B, T, S, 1)
-    ).squeeze(-1)
-    px = px.permute((0, 2, 1))  # (B, S, T)
-
-    if hat_type == "regular":
-        px = torch.cat(
-            (
-                px,
-                torch.full(
-                    (B, S, 1), float("-inf"), device=px.device, dtype=px.dtype
-                ),
-            ),
-            dim=2,
-        )  # now: [B][S][T+1], index [:,:,T] has -inf..
-
-    px[:, :, :T] -= normalizers[:, :S, :]  # (B, S, T+1)
-
-    py = (
-        logits[:, :, :, termination_symbol].permute((0, 2, 1)).clone()
-    )  # [B][S+1][T]
-    #py -= normalizers
-    py = torch.nn.functional.logsigmoid(py)
-
-    if hat_type == "regular":
-        px = fix_for_boundary(px, boundary)
-    elif hat_type == "constrained":
-        px += py[:, 1:, :]
-
-    return (px, py)
-
 def get_rnnt_logprobs_joint(
     logits: Tensor,
     symbols: Tensor,
@@ -532,15 +409,14 @@ def get_rnnt_logprobs_joint(
 
     if blank_sigmoid:
         assert termination_symbol == 0, termination_symbol
-        blank_logit = logits[:, :, :, 0]  # (B, T, S+1)
-        logits = logits[:, :, :, 1:]  # (B, T, S+1, C-1)
+        denom_scores = logits[:, :, :, 1:]  # (B, T, S+1, C-1)
         if denom_lm_logp is not None:
             assert denom_lm_logp.shape == (B, S+1, C-1)
-            logits = logits + denom_lm_logp.unsqueeze(1)
+            denom_scores = denom_scores + denom_lm_logp.unsqueeze(1)
+        normalizers = torch.logsumexp(denom_scores, dim=3)
     else:
-        blank_logit = logits[:, :, :, termination_symbol]  # (B, T, S+1)
+        normalizers = torch.logsumexp(logits, dim=3)
 
-    normalizers = torch.logsumexp(logits, dim=3)
     normalizers = normalizers.permute((0, 2, 1))
 
     px = torch.gather(
@@ -561,7 +437,7 @@ def get_rnnt_logprobs_joint(
 
     px[:, :, :T] -= normalizers[:, :S, :]
 
-    py = blank_logit.permute((0, 2, 1)).clone()  # [B][S+1][T]
+    py = logits[:, :, :, termination_symbol].permute((0, 2, 1)).clone()  # [B][S+1][T]
     if blank_sigmoid:
         py = torch.nn.functional.logsigmoid(py)
     else:
@@ -1105,6 +981,8 @@ def get_rnnt_logprobs_pruned(
     termination_symbol: int,
     boundary: Tensor,
     rnnt_type: str = "regular",
+    blank_sigmoid: bool = False,
+    denom_lm_logp: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor]:
     """Construct px, py for mutual_information_recursion with pruned output.
 
@@ -1185,7 +1063,15 @@ def get_rnnt_logprobs_pruned(
     ), f"Modified transducer requires T >= S, but got T={T} and S={S}"
     assert rnnt_type in ["regular", "modified", "constrained"], rnnt_type
 
-    normalizers = torch.logsumexp(logits, dim=3)
+    if blank_sigmoid:
+        assert termination_symbol == 0, termination_symbol
+        denom_scores = logits[:, :, :, 1:]  # (B, T, S+1, C-1)
+        if denom_lm_logp is not None:
+            assert denom_lm_logp.shape == (B, S+1, C-1)
+            denom_scores = denom_scores + denom_lm_logp.unsqueeze(1)
+        normalizers = torch.logsumexp(denom_scores, dim=3)
+    else:
+        normalizers = torch.logsumexp(logits, dim=3)
 
     symbols_with_terminal = torch.cat(
         (
@@ -1243,7 +1129,10 @@ def get_rnnt_logprobs_pruned(
         )  # now: [B][S][T+1], index [:,:,T] has -inf..
 
     py = logits[:, :, :, termination_symbol].clone()  # (B, T, s_range)
-    py = py - normalizers
+    if blank_sigmoid:
+        py = torch.nn.functional.logsigmoid(py)
+    else:
+        py = py - normalizers
 
     # (B, T, S + 1) with index larger than s_range in dim 2 filled with -inf
     py = torch.cat(
@@ -1281,6 +1170,8 @@ def rnnt_loss_pruned(
     rnnt_type: str = "regular",
     delay_penalty: float = 0.0,
     reduction: Optional[str] = "mean",
+    blank_sigmoid: bool = False,
+    denom_lm_logp: Optional[Tensor] = None,
 ) -> Tensor:
     """A RNN-T loss with pruning, which uses the output of a pruned 'joiner'
     network as input, i.e. a 4 dimensions tensor with shape (B, T, s_range, C),
@@ -1343,6 +1234,8 @@ def rnnt_loss_pruned(
         termination_symbol=termination_symbol,
         boundary=boundary,
         rnnt_type=rnnt_type,
+        blank_sigmoid=blank_sigmoid,
+        denom_lm_logp=denom_lm_logp,
     )
 
     if delay_penalty > 0.0:
@@ -1384,6 +1277,8 @@ def get_rnnt_logprobs_smoothed(
     am_only_scale: float = 0.1,
     boundary: Optional[Tensor] = None,
     rnnt_type: str = "regular",
+    blank_sigmoid: bool = False,
+    denom_lm_logp: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor]:
     """
     Reduces RNN-T problem (the simple case, where joiner network is just
@@ -1457,6 +1352,7 @@ def get_rnnt_logprobs_smoothed(
                        *next* context on the *current* frame, e.g. if we emit
                        c given "a b" context, we are forced to emit "blank"
                        given "b c" context on the current frame.
+                       
     Returns:
         (px, py) (the names are quite arbitrary).
            px: logprobs, of shape [B][S][T+1] if rnnt_type == "regular",
@@ -1504,8 +1400,19 @@ def get_rnnt_logprobs_smoothed(
 
     # subtracting am_max and lm_max is to ensure the probs are in a good range
     # to do exp() without causing underflow or overflow.
+    #TODO: denom_lm_logp relation (currently ignored)
+    if blank_sigmoid:
+        assert termination_symbol == 0, termination_symbol
+        symbols = torch.maximum(symbols-1, 0)  # remove blank
+        C = C - 1  # remove blank
+        am = am[:, :, 1:]  # [B][T][C]
+        lm = lm[:, :, 1:]  # [B][S+1][C]
+        am_blank = am[:, :, 0]  # [B][T]
+        lm_blank = am[:, :, 0]  # [B][S+1]
+
     am_max, _ = torch.max(am, dim=2, keepdim=True)  # am_max: [B][T][1]
     lm_max, _ = torch.max(lm, dim=2, keepdim=True)  # lm_max: [B][S+1][1]
+    
     am_probs = (am - am_max).exp()  # [B][T][C]
     lm_probs = (lm - lm_max).exp()  # [B][S+1][C]
     # normalizers: [B][S+1][T]
@@ -1528,6 +1435,7 @@ def get_rnnt_logprobs_smoothed(
         .log()
         + am_max
     )  # [B][T][1]
+
     amonly_normalizers = amonly_normalizers.transpose(1, 2)  # [B][1][T]
     unigram_lm = unigram_lm.log()
     lmonly_normalizers = (
@@ -1576,9 +1484,14 @@ def get_rnnt_logprobs_smoothed(
     px_lmonly = px_lm - lmonly_normalizers[:, :S, :]
 
     # py is the probs of termination symbols, of shape [B][S+1][T]
-    py_am = am[:, :, termination_symbol].unsqueeze(1)  # [B][1][T]
-    py_lm = lm[:, :, termination_symbol].unsqueeze(2)  # [B][S+1][1]
-    py = py_am + py_lm - normalizers
+    if blank_sigmoid:
+        py_am = am_blank.unsqueeze(1)  # [B][1][T]
+        py_lm = lm_blank.unsqueeze(2)  # [B][S+1][1]
+        py = torch.nn.functional.logsigmoid(py_am + py_lm)
+    else:
+        py_am = am[:, :, termination_symbol].unsqueeze(1)  # [B][1][T]
+        py_lm = lm[:, :, termination_symbol].unsqueeze(2)  # [B][S+1][1]
+        py = py_am + py_lm - normalizers
 
     py_lm_unigram = unigram_lm[0][0][termination_symbol]  # scalar, normalized..
     py_amonly = py_am + py_lm_unigram - amonly_normalizers  # [B][S+1][T]
@@ -1624,6 +1537,9 @@ def rnnt_loss_smoothed(
     delay_penalty: float = 0.0,
     reduction: Optional[str] = "mean",
     return_grad: bool = False,
+    blank_sigmoid: bool = False,
+    denom_lm_logp: Optional[Tensor] = None,
+
 ) -> Union[Tuple[Tensor, Tuple[Tensor, Tensor]], Tensor]:
     """A simple case of the RNN-T loss, where the 'joiner' network is just
     addition.
@@ -1683,6 +1599,12 @@ def rnnt_loss_smoothed(
         get if you did `torch.autograd.grad((-loss.sum()), [px, py])`, note, the
         loss here is the loss with reduction "none".
         This is useful to implement the pruned version of rnnt loss.
+      blank_sigmoid:
+        If true, the blank symbol is separately modeled with sigmoid activation.
+      denom_lm:
+        If supplied, a tensor of shape [B, T, S+1] containing the log
+        probabilities of the language model, which will be added to the
+        log probabilities of the RNN-T for each symbol at the denominator.
 
     Returns:
        If return_grad is False, returns a tensor of shape (B,), containing the
@@ -1701,6 +1623,8 @@ def rnnt_loss_smoothed(
         am_only_scale=am_only_scale,
         boundary=boundary,
         rnnt_type=rnnt_type,
+        blank_sigmoid=blank_sigmoid,
+        denom_lm_logp=denom_lm_logp,
     )
 
     if delay_penalty > 0.0:
