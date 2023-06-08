@@ -1164,8 +1164,8 @@ def get_rnnt_logprobs_pruned(
         px += py[:, 1:, :]
 
     if blank_sigmoid:
-        px += logsubstractexp(torch.zeros_like(py[:, :S, :]),
-                              py[:, :S, :])
+        px[:, :, :T] += logsubstractexp(torch.zeros_like(py[:, :S, :]),
+                                        py[:, :S, :])
 
     return (px, py)
 
