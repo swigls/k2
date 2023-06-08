@@ -1410,7 +1410,7 @@ def get_rnnt_logprobs_smoothed(
         am = am[:, :, 1:]  # [B][T][C]
         lm = lm[:, :, 1:]  # [B][S+1][C]
         am_blank = am[:, :, 0]  # [B][T]
-        lm_blank = am[:, :, 0]  # [B][S+1]
+        lm_blank = lm[:, :, 0]  # [B][S+1]
 
     am_max, _ = torch.max(am, dim=2, keepdim=True)  # am_max: [B][T][1]
     lm_max, _ = torch.max(lm, dim=2, keepdim=True)  # lm_max: [B][S+1][1]
