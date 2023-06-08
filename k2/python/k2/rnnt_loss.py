@@ -409,15 +409,16 @@ def get_rnnt_logprobs_joint(
 
     if blank_sigmoid:
         assert termination_symbol == 0, termination_symbol
+        assert rnnt_type == "regular", rnnt_type
         denom_scores = logits[:, :, :, 1:]  # (B, T, S+1, C-1)
         if denom_lm_logp is not None:
             assert denom_lm_logp.shape == (B, S+1, C-1)
             denom_scores = denom_scores + denom_lm_logp.unsqueeze(1)
-        normalizers = torch.logsumexp(denom_scores, dim=3)
+        normalizers = torch.logsumexp(denom_scores, dim=3)  # (B, T, S+1)
     else:
         normalizers = torch.logsumexp(logits, dim=3)
 
-    normalizers = normalizers.permute((0, 2, 1))
+    normalizers = normalizers.permute((0, 2, 1))  # (B, S+1, T)
 
     px = torch.gather(
         logits, dim=3, index=symbols.reshape(B, 1, S, 1).expand(B, T, S, 1)
@@ -439,7 +440,7 @@ def get_rnnt_logprobs_joint(
 
     py = logits[:, :, :, termination_symbol].permute((0, 2, 1)).clone()  # [B][S+1][T]
     if blank_sigmoid:
-        py = torch.nn.functional.logsigmoid(py)
+        py = torch.nn.functional.logsigmoid(py)  # [B][S+1][T]
     else:
         py -= normalizers
 
@@ -447,6 +448,9 @@ def get_rnnt_logprobs_joint(
         px = fix_for_boundary(px, boundary)
     elif rnnt_type == "constrained":
         px += py[:, 1:, :]
+
+    if blank_sigmoid:
+        px[:, :, :T] += logsubstractexp(0, py[:, :S, :])
 
     return (px, py)
 
@@ -1115,7 +1119,7 @@ def get_rnnt_logprobs_pruned(
     # (B, T, S) with index out of s_range in dim 2 fill with -inf
     px = _roll_by_shifts(px, ranges[:, :, 0])[:, :, :S]
 
-    px = px.permute((0, 2, 1))
+    px = px.permute((0, 2, 1))  # now: [B][S][T]
 
     if rnnt_type == "regular":
         px = torch.cat(
@@ -1130,7 +1134,7 @@ def get_rnnt_logprobs_pruned(
 
     py = logits[:, :, :, termination_symbol].clone()  # (B, T, s_range)
     if blank_sigmoid:
-        py = torch.nn.functional.logsigmoid(py)
+        py = torch.nn.functional.logsigmoid(py)  # (B, T, s_range)
     else:
         py = py - normalizers
 
@@ -1157,6 +1161,9 @@ def get_rnnt_logprobs_pruned(
         px = fix_for_boundary(px, boundary)
     elif rnnt_type == "constrained":
         px += py[:, 1:, :]
+
+    if blank_sigmoid:
+        px += logsubstractexp(0, py[:, :S, :])
 
     return (px, py)
 
@@ -1267,6 +1274,9 @@ def rnnt_loss_pruned(
             f"reduction should be ('none' | 'mean' | 'sum'), given {reduction}"
         )
 
+def logsubstractexp(tensor, other):
+    a = torch.max(tensor, other)
+    return a + ((tensor - a).exp() - (other - a).exp()).log()
 
 def get_rnnt_logprobs_smoothed(
     lm: Tensor,
@@ -1490,6 +1500,9 @@ def get_rnnt_logprobs_smoothed(
         py_am = am_blank.unsqueeze(1)  # [B][1][T]
         py_lm = lm_blank.unsqueeze(2)  # [B][S+1][1]
         py = torch.nn.functional.logsigmoid(py_am + py_lm)
+        assert False
+        #TODO: implement log-prob for blank_sigmoid case
+        #px += logsubstractexp(0, py)  # [B][S][T+1] or [B][S][T]
     else:
         py_am = am[:, :, termination_symbol].unsqueeze(1)  # [B][1][T]
         py_lm = lm[:, :, termination_symbol].unsqueeze(2)  # [B][S+1][1]
