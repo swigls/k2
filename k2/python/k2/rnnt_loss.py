@@ -1403,7 +1403,9 @@ def get_rnnt_logprobs_smoothed(
     #TODO: denom_lm_logp relation (currently ignored)
     if blank_sigmoid:
         assert termination_symbol == 0, termination_symbol
-        symbols = torch.maximum(symbols-1, 0)  # remove blank
+        symbols = torch.maximum(symbols-1,
+                                torch.zeros(1, device=symbols.device,
+                                            dtype=symbols.dtype))  # remove blank
         C = C - 1  # remove blank
         am = am[:, :, 1:]  # [B][T][C]
         lm = lm[:, :, 1:]  # [B][S+1][C]
@@ -1539,7 +1541,6 @@ def rnnt_loss_smoothed(
     return_grad: bool = False,
     blank_sigmoid: bool = False,
     denom_lm_logp: Optional[Tensor] = None,
-
 ) -> Union[Tuple[Tensor, Tuple[Tensor, Tensor]], Tensor]:
     """A simple case of the RNN-T loss, where the 'joiner' network is just
     addition.
