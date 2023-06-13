@@ -440,8 +440,8 @@ def get_rnnt_logprobs_joint(
 
     py = logits[:, :, :, termination_symbol].permute((0, 2, 1)).clone()  # [B][S+1][T]
     if blank_sigmoid:
-        py = torch.nn.functional.logsigmoid(py)  # [B][S+1][T]
-        py_neg = torch.nn.functional.logsigmoid(-1 * py)  # [B][S+1][T]
+        py, py_neg = torch.nn.functional.logsigmoid(py), \
+                     torch.nn.functional.logsigmoid(-1 * py)  # [B][S+1][T]
         px[:, :, :T] += py_neg[:, :S, :]  # [B][S][T]
     else:
         py -= normalizers
@@ -1133,8 +1133,8 @@ def get_rnnt_logprobs_pruned(
 
     py = logits[:, :, :, termination_symbol].clone()  # (B, T, s_range)
     if blank_sigmoid:
-        py = torch.nn.functional.logsigmoid(py)  # (B, T, s_range)
-        py_neg = torch.nn.functional.logsigmoid(-1 * py)  # (B, T, s_range)
+        py, py_neg = torch.nn.functional.logsigmoid(py), \
+                     torch.nn.functional.logsigmoid(-1 * py)  # (B, T, s_range)
         
         # (B, T, S + 1) with index larger than s_range in dim 2 filled with -inf
         py_neg = torch.cat(
@@ -1516,8 +1516,8 @@ def get_rnnt_logprobs_smoothed(
     if blank_sigmoid:
         py_am = am_blank.unsqueeze(1)  # [B][1][T]
         py_lm = lm_blank.unsqueeze(2)  # [B][S+1][1]
-        py = torch.nn.functional.logsigmoid(py_am + py_lm)  # [B][S+1][T]
-        py_neg = torch.nn.functional.logsigmoid(-1 * (py_am - py_lm))  # [B][S+1][T]
+        py, py_neg = torch.nn.functional.logsigmoid(py_am + py_lm), \
+                     torch.nn.functional.logsigmoid(-1 * (py_am + py_lm))  # [B][S+1][T]
         px[:, :, :T] += py_neg[:, :S, :] # [B][S][T]
         #NOTE: am is not used in practice (joint-simple and lm are used)
         lm_blank_probs = torch.nn.functional.sigmoid(lm_blank)  # [B][S+1]
@@ -1527,12 +1527,14 @@ def get_rnnt_logprobs_smoothed(
         )  # [1][1]
         unigram_lm_blank = unigram_lm_blank.log()  # [1][1]
         py_lm_unigram = unigram_lm_blank[0][0]  # scalar
-        py_amonly = torch.nn.functional.logsigmoid(py_am + py_lm_unigram)  # [B][1][T]
-        py_amonly_neg = torch.nn.functional.logsigmoid(-1 * (py_am + py_lm_unigram))  # [B][1][T]
+        py_amonly, py_amonly_neg = \
+            torch.nn.functional.logsigmoid(py_am + py_lm_unigram), \
+            torch.nn.functional.logsigmoid(-1 * (py_am + py_lm_unigram))  # [B][1][T]
         px_amonly[:, :, :T] += py_amonly_neg[:, :S, :]  # [B][S][T]
 
-        py_lmonly = torch.nn.functional.logsigmoid(py_lm)  # [B][S+1][T]
-        py_lmonly_neg = torch.nn.functional.logsigmoid(-1 * py_lm)  # [B][S+1][T]
+        py_lmonly, py_lmonly_neg = \
+            torch.nn.functional.logsigmoid(py_lm), \
+            torch.nn.functional.logsigmoid(-1 * py_lm)  # [B][S+1][T]
         px_lmonly[:, :, :T] += py_lmonly_neg[:, :S, :]  # [B][S][T]
     else:
         py_am = am[:, :, termination_symbol].unsqueeze(1)  # [B][1][T]
