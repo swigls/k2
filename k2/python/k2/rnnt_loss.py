@@ -1413,6 +1413,7 @@ def get_rnnt_logprobs_smoothed(
     # subtracting am_max and lm_max is to ensure the probs are in a good range
     # to do exp() without causing underflow or overflow.
     #TODO: denom_lm_logp relation (currently ignored)
+    #NOTE: am is not used in practice (joint-simple and lm are used)
     if blank_sigmoid:
         assert termination_symbol == 0, termination_symbol
         symbols = torch.maximum(symbols-1,
@@ -1502,7 +1503,6 @@ def get_rnnt_logprobs_smoothed(
         py_am = am_blank.unsqueeze(1)  # [B][1][T]
         py_lm = lm_blank.unsqueeze(2)  # [B][S+1][1]
         py = torch.nn.functional.logsigmoid(py_am + py_lm)
-        assert False
         #TODO: implement log-prob for blank_sigmoid case
         #px += logsubstractexp(0, py)  # [B][S][T+1] or [B][S][T]
     else:
