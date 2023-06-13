@@ -1500,7 +1500,8 @@ def get_rnnt_logprobs_smoothed(
         py_am = am_blank.unsqueeze(1)  # [B][1][T]
         py_lm = lm_blank.unsqueeze(2)  # [B][S+1][1]
         py = torch.nn.functional.logsigmoid(py_am + py_lm)  # [B][S+1][T]
-        px[:, :, :T] += logsubstractexp(0, py[:, :S, :])  # [B][S][T]
+        px[:, :, :T] += logsubstractexp(torch.zeros_like(py[:, :S, :])
+                                        py[:, :S, :])  # [B][S][T]
         #NOTE: am is not used in practice (joint-simple and lm are used)
         lm_blank_probs = torch.nn.functional.sigmoid(lm_blank)  # [B][S+1]
         unigram_lm_blank = (
@@ -1510,10 +1511,12 @@ def get_rnnt_logprobs_smoothed(
         unigram_lm_blank = unigram_lm_blank.log()  # [1][1]
         py_lm_unigram = unigram_lm_blank[0][0]  # scalar, normalized..
         py_amonly = torch.nn.functional.logsigmoid(py_am + py_lm_unigram)  # [B][S+1][T]
-        px_amonly[:, :, :T] += logsubstractexp(0, py_amonly[:, S:, :])
+        px_amonly[:, :, :T] += logsubstractexp(torch.zeros_like(py_amonly[:, :S, :]),
+                                               py_amonly[:, S:, :])
 
         py_lmonly = torch.nn.functional.logsigmoid(py_lm)  # [B][S+1][T]
-        px_lmonly[:, :, :T] += logsubstractexp(0, py_lmonly[:, :S, :])
+        px_lmonly[:, :, :T] += logsubstractexp(torch.zeros_like(py_lmonly[:, :S, :]),
+                                               py_lmonly[:, :S, :])
     else:
         py_am = am[:, :, termination_symbol].unsqueeze(1)  # [B][1][T]
         py_lm = lm[:, :, termination_symbol].unsqueeze(2)  # [B][S+1][1]
