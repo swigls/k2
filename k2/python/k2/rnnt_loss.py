@@ -441,6 +441,8 @@ def get_rnnt_logprobs_joint(
     py = logits[:, :, :, termination_symbol].permute((0, 2, 1)).clone()  # [B][S+1][T]
     if blank_sigmoid:
         py = torch.nn.functional.logsigmoid(py)  # [B][S+1][T]
+        px[:, :, :T] += logsubstractexp(torch.zeros_like(py[:, S:, :]),
+                                        py[:, :S, :])
     else:
         py -= normalizers
 
@@ -448,11 +450,7 @@ def get_rnnt_logprobs_joint(
         px = fix_for_boundary(px, boundary)
     elif rnnt_type == "constrained":
         px += py[:, 1:, :]
-
-    if blank_sigmoid:
-        px[:, :, :T] += logsubstractexp(torch.zeros_like(py[:, S:, :]),
-                                        py[:, :S, :])
-
+        
     return (px, py)
 
 def rnnt_loss(
@@ -1158,14 +1156,13 @@ def get_rnnt_logprobs_pruned(
     # (B, S + 1, T)
     py = py.permute((0, 2, 1))
 
+    if blank_sigmoid:
+        px[:, :, :T] += logsubstractexp(torch.zeros_like(py[:, :S, :]),
+                                        py[:, :S, :])
     if rnnt_type == "regular":
         px = fix_for_boundary(px, boundary)
     elif rnnt_type == "constrained":
         px += py[:, 1:, :]
-
-    if blank_sigmoid:
-        px[:, :, :T] += logsubstractexp(torch.zeros_like(py[:, :S, :]),
-                                        py[:, :S, :])
 
     return (px, py)
 
@@ -1502,17 +1499,29 @@ def get_rnnt_logprobs_smoothed(
     if blank_sigmoid:
         py_am = am_blank.unsqueeze(1)  # [B][1][T]
         py_lm = lm_blank.unsqueeze(2)  # [B][S+1][1]
-        py = torch.nn.functional.logsigmoid(py_am + py_lm)
-        #TODO: implement log-prob for blank_sigmoid case
-        #px += logsubstractexp(0, py)  # [B][S][T+1] or [B][S][T]
+        py = torch.nn.functional.logsigmoid(py_am + py_lm)  # [B][S+1][T]
+        px[:, :, :T] += logsubstractexp(0, py[:, :S, :])  # [B][S][T]
+        #NOTE: am is not used in practice (joint-simple and lm are used)
+        lm_blank_probs = torch.nn.functional.sigmoid(lm_blank)  # [B][S+1]
+        unigram_lm_blank = (
+            torch.mean(lm_blank_probs, dim=(0, 1), keepdim=True)
+            + torch.finfo(lm_probs.dtype).tiny
+        )  # [1][1]
+        unigram_lm_blank = unigram_lm_blank.log()  # [1][1]
+        py_lm_unigram = unigram_lm_blank[0][0]  # scalar, normalized..
+        py_amonly = torch.nn.functional.logsigmoid(py_am + py_lm_unigram)  # [B][S+1][T]
+        px_amonly[:, :, :T] += logsubstractexp(0, py_amonly[:, S:, :])
+
+        py_lmonly = torch.nn.functional.logsigmoid(py_lm)  # [B][S+1][T]
+        px_lmonly[:, :, :T] += logsubstractexp(0, py_lmonly[:, :S, :])
     else:
         py_am = am[:, :, termination_symbol].unsqueeze(1)  # [B][1][T]
         py_lm = lm[:, :, termination_symbol].unsqueeze(2)  # [B][S+1][1]
         py = py_am + py_lm - normalizers
 
-    py_lm_unigram = unigram_lm[0][0][termination_symbol]  # scalar, normalized..
-    py_amonly = py_am + py_lm_unigram - amonly_normalizers  # [B][S+1][T]
-    py_lmonly = py_lm - lmonly_normalizers  # [B][S+1][T]
+        py_lm_unigram = unigram_lm[0][0][termination_symbol]  # scalar, normalized..
+        py_amonly = py_am + py_lm_unigram - amonly_normalizers  # [B][S+1][T]
+        py_lmonly = py_lm - lmonly_normalizers  # [B][S+1][T]
 
     combined_scale = 1.0 - lm_only_scale - am_only_scale
 
