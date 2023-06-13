@@ -441,8 +441,8 @@ def get_rnnt_logprobs_joint(
     py = logits[:, :, :, termination_symbol].permute((0, 2, 1)).clone()  # [B][S+1][T]
     if blank_sigmoid:
         py = torch.nn.functional.logsigmoid(py)  # [B][S+1][T]
-        px[:, :, :T] += logsubstractexp(torch.zeros_like(py[:, S:, :]),
-                                        py[:, :S, :])
+        py_neg = torch.nn.functional.logsigmoid(-1 * py)  # [B][S+1][T]
+        px[:, :, :T] += py_neg[:, :S, :]  # [B][S][T]
     else:
         py -= normalizers
 
@@ -1134,6 +1134,26 @@ def get_rnnt_logprobs_pruned(
     py = logits[:, :, :, termination_symbol].clone()  # (B, T, s_range)
     if blank_sigmoid:
         py = torch.nn.functional.logsigmoid(py)  # (B, T, s_range)
+        py_neg = torch.nn.functional.logsigmoid(-1 * py)  # (B, T, s_range)
+        
+        # (B, T, S + 1) with index larger than s_range in dim 2 filled with -inf
+        py_neg = torch.cat(
+            (
+                py_neg,
+                torch.full(
+                    (B, T, S + 1 - s_range),
+                    float("-inf"),
+                    device=py_neg.device,
+                    dtype=py_neg.dtype,
+                ),
+            ),
+            dim=2,
+        )        
+        # (B, T, S + 1) with index out of s_range in dim 2 fill with -inf
+        py_neg = _roll_by_shifts(py_neg, ranges[:, :, 0])
+        # (B, S + 1, T)
+        py_neg = py_neg.permute((0, 2, 1))
+        px[:, :, :T] += py_neg[:, :S, :]  # (B, S, T)
     else:
         py = py - normalizers
 
@@ -1156,9 +1176,6 @@ def get_rnnt_logprobs_pruned(
     # (B, S + 1, T)
     py = py.permute((0, 2, 1))
 
-    if blank_sigmoid:
-        px[:, :, :T] += logsubstractexp(torch.zeros_like(py[:, :S, :]),
-                                        py[:, :S, :])
     if rnnt_type == "regular":
         px = fix_for_boundary(px, boundary)
     elif rnnt_type == "constrained":
@@ -1273,9 +1290,9 @@ def rnnt_loss_pruned(
             f"reduction should be ('none' | 'mean' | 'sum'), given {reduction}"
         )
 
-def logsubstractexp(tensor, other):
-    a = torch.max(tensor, other)
-    return a + ((tensor - a).exp() - (other - a).exp()).log()
+#def logsubstractexp(tensor, other):
+#    a = torch.max(tensor, other)
+#    return a + ((tensor - a).exp() - (other - a).exp()).log()
 
 def get_rnnt_logprobs_smoothed(
     lm: Tensor,
@@ -1500,8 +1517,8 @@ def get_rnnt_logprobs_smoothed(
         py_am = am_blank.unsqueeze(1)  # [B][1][T]
         py_lm = lm_blank.unsqueeze(2)  # [B][S+1][1]
         py = torch.nn.functional.logsigmoid(py_am + py_lm)  # [B][S+1][T]
-        px[:, :, :T] += logsubstractexp(torch.zeros_like(py[:, :S, :]),
-                                        py[:, :S, :])  # [B][S][T]
+        py_neg = torch.nn.functional.logsigmoid(-1 * (py_am - py_lm))  # [B][S+1][T]
+        px[:, :, :T] += py_neg[:, :S, :] # [B][S][T]
         #NOTE: am is not used in practice (joint-simple and lm are used)
         lm_blank_probs = torch.nn.functional.sigmoid(lm_blank)  # [B][S+1]
         unigram_lm_blank = (
@@ -1511,12 +1528,12 @@ def get_rnnt_logprobs_smoothed(
         unigram_lm_blank = unigram_lm_blank.log()  # [1][1]
         py_lm_unigram = unigram_lm_blank[0][0]  # scalar
         py_amonly = torch.nn.functional.logsigmoid(py_am + py_lm_unigram)  # [B][1][T]
-        px_amonly[:, :, :T] += logsubstractexp(torch.zeros_like(py_amonly[:, :S, :]),
-                                               py_amonly[:, :S, :])
+        py_amonly_neg = torch.nn.functional.logsigmoid(-1 * (py_am + py_lm_unigram))  # [B][1][T]
+        px_amonly[:, :, :T] += py_amonly_neg[:, :S, :]  # [B][S][T]
 
         py_lmonly = torch.nn.functional.logsigmoid(py_lm)  # [B][S+1][T]
-        px_lmonly[:, :, :T] += logsubstractexp(torch.zeros_like(py_lmonly[:, :S, :]),
-                                               py_lmonly[:, :S, :])
+        py_lmonly_neg = torch.nn.functional.logsigmoid(-1 * py_lm)  # [B][S+1][T]
+        px_lmonly[:, :, :T] += py_lmonly_neg[:, :S, :]  # [B][S][T]
     else:
         py_am = am[:, :, termination_symbol].unsqueeze(1)  # [B][1][T]
         py_lm = lm[:, :, termination_symbol].unsqueeze(2)  # [B][S+1][1]
