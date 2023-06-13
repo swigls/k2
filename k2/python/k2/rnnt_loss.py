@@ -1500,7 +1500,7 @@ def get_rnnt_logprobs_smoothed(
         py_am = am_blank.unsqueeze(1)  # [B][1][T]
         py_lm = lm_blank.unsqueeze(2)  # [B][S+1][1]
         py = torch.nn.functional.logsigmoid(py_am + py_lm)  # [B][S+1][T]
-        px[:, :, :T] += logsubstractexp(torch.zeros_like(py[:, :S, :])
+        px[:, :, :T] += logsubstractexp(torch.zeros_like(py[:, :S, :]),
                                         py[:, :S, :])  # [B][S][T]
         #NOTE: am is not used in practice (joint-simple and lm are used)
         lm_blank_probs = torch.nn.functional.sigmoid(lm_blank)  # [B][S+1]
