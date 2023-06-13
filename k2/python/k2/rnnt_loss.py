@@ -1509,10 +1509,11 @@ def get_rnnt_logprobs_smoothed(
             + torch.finfo(lm_probs.dtype).tiny
         )  # [1][1]
         unigram_lm_blank = unigram_lm_blank.log()  # [1][1]
-        py_lm_unigram = unigram_lm_blank[0][0]  # scalar, normalized..
-        py_amonly = torch.nn.functional.logsigmoid(py_am + py_lm_unigram)  # [B][S+1][T]
-        px_amonly[:, :, :T] += logsubstractexp(torch.zeros_like(py_amonly[:, :S, :]),
-                                               py_amonly[:, S:, :])
+        py_lm_unigram = unigram_lm_blank[0][0]  # scalar
+        py_amonly = torch.nn.functional.logsigmoid(py_am + py_lm_unigram)  # [B][1][T]
+        px_amonly[:, :, :T] = px_amonly[:, :, :T] + \
+                                logsubstractexp(torch.zeros_like(py_amonly[:, :S, :]),
+                                                py_amonly[:, S:, :])
 
         py_lmonly = torch.nn.functional.logsigmoid(py_lm)  # [B][S+1][T]
         px_lmonly[:, :, :T] += logsubstractexp(torch.zeros_like(py_lmonly[:, :S, :]),
