@@ -1024,6 +1024,10 @@ def get_rnnt_logprobs_pruned(
                        *next* context on the *current* frame, e.g. if we emit
                        c given "a b" context, we are forced to emit "blank"
                        given "b c" context on the current frame.
+      denom_lm:
+        If supplied, a tensor of shape [B, S+1] containing the log probs
+        of the internal language model, which will be added to the
+        log probabilities of the RNN-T for each symbol at the denominator.
     Returns:
       (px, py) (the names are quite arbitrary)::
 
@@ -1304,7 +1308,6 @@ def get_rnnt_logprobs_smoothed(
     boundary: Optional[Tensor] = None,
     rnnt_type: str = "regular",
     blank_sigmoid: bool = False,
-    denom_lm_logp: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor]:
     """
     Reduces RNN-T problem (the simple case, where joiner network is just
@@ -1586,7 +1589,6 @@ def rnnt_loss_smoothed(
     reduction: Optional[str] = "mean",
     return_grad: bool = False,
     blank_sigmoid: bool = False,
-    denom_lm_logp: Optional[Tensor] = None,
 ) -> Union[Tuple[Tensor, Tuple[Tensor, Tensor]], Tensor]:
     """A simple case of the RNN-T loss, where the 'joiner' network is just
     addition.
@@ -1648,10 +1650,6 @@ def rnnt_loss_smoothed(
         This is useful to implement the pruned version of rnnt loss.
       blank_sigmoid:
         If true, the blank symbol is separately modeled with sigmoid activation.
-      denom_lm:
-        If supplied, a tensor of shape [B, T, S+1] containing the log
-        probabilities of the language model, which will be added to the
-        log probabilities of the RNN-T for each symbol at the denominator.
 
     Returns:
        If return_grad is False, returns a tensor of shape (B,), containing the
@@ -1671,7 +1669,6 @@ def rnnt_loss_smoothed(
         boundary=boundary,
         rnnt_type=rnnt_type,
         blank_sigmoid=blank_sigmoid,
-        denom_lm_logp=denom_lm_logp,
     )
 
     if delay_penalty > 0.0:
