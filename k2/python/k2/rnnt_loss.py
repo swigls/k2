@@ -1024,8 +1024,8 @@ def get_rnnt_logprobs_pruned(
                        *next* context on the *current* frame, e.g. if we emit
                        c given "a b" context, we are forced to emit "blank"
                        given "b c" context on the current frame.
-      denom_lm:
-        If supplied, a tensor of shape [B, S+1] containing the log probs
+      denom_lm_logp:
+        If supplied, a tensor of shape [B, s_range, C-1] containing the log probs
         of the internal language model, which will be added to the
         log probabilities of the RNN-T for each symbol at the denominator.
     Returns:
@@ -1072,9 +1072,9 @@ def get_rnnt_logprobs_pruned(
 
     if blank_sigmoid:
         assert termination_symbol == 0, termination_symbol
-        denom_scores = logits[:, :, :, 1:]  # (B, T, S+1, C-1)
+        denom_scores = logits[:, :, :, 1:]  # (B, T, s_range, C-1)
         if denom_lm_logp is not None:
-            assert denom_lm_logp.shape == (B, S+1, C-1)
+            assert denom_lm_logp.shape == (B, s_range, C-1)
             denom_scores = denom_scores + denom_lm_logp.unsqueeze(1)
         normalizers = torch.logsumexp(denom_scores, dim=3)
     else:
