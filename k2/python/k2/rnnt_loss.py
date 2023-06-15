@@ -1074,8 +1074,8 @@ def get_rnnt_logprobs_pruned(
         assert termination_symbol == 0, termination_symbol
         denom_scores = logits[:, :, :, 1:]  # (B, T, s_range, C-1)
         if denom_lm_logp is not None:
-            assert denom_lm_logp.shape == (B, s_range, C-1)
-            denom_scores = denom_scores + denom_lm_logp.unsqueeze(1)
+            assert denom_lm_logp.shape == (B, T, s_range, C-1)
+            denom_scores = denom_scores + denom_lm_logp
         normalizers = torch.logsumexp(denom_scores, dim=3)
     else:
         normalizers = torch.logsumexp(logits, dim=3)
