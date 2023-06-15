@@ -1025,7 +1025,7 @@ def get_rnnt_logprobs_pruned(
                        c given "a b" context, we are forced to emit "blank"
                        given "b c" context on the current frame.
       denom_lm_logp:
-        If supplied, a tensor of shape [B, s_range, C-1] containing the log probs
+        If supplied, a tensor of shape [B, T, s_range, C-1] containing the log probs
         of the internal language model, which will be added to the
         log probabilities of the RNN-T for each symbol at the denominator.
     Returns:
