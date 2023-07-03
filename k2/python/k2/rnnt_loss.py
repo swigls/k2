@@ -961,6 +961,7 @@ def get_rnnt_logprobs_pruned(
     termination_symbol: int,
     boundary: Tensor,
     rnnt_type: str = "regular",
+    py_add: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor]:
     """Construct px, py for mutual_information_recursion with pruned output.
 
@@ -999,6 +1000,9 @@ def get_rnnt_logprobs_pruned(
                        *next* context on the *current* frame, e.g. if we emit
                        c given "a b" context, we are forced to emit "blank"
                        given "b c" context on the current frame.
+      py_add:
+        A optional tensor of shape [B, T, prune_range] that will be added to py
+        after normalization.
     Returns:
       (px, py) (the names are quite arbitrary)::
 
@@ -1101,6 +1105,9 @@ def get_rnnt_logprobs_pruned(
     py = logits[:, :, :, termination_symbol].clone()  # (B, T, s_range)
     py = py - normalizers
 
+    if py_add is not None:
+        py = py + py_add
+
     # (B, T, S + 1) with index larger than s_range in dim 2 filled with -inf
     py = torch.cat(
         (
@@ -1137,6 +1144,7 @@ def rnnt_loss_pruned(
     rnnt_type: str = "regular",
     delay_penalty: float = 0.0,
     reduction: Optional[str] = "mean",
+    py_add: Optional[Tensor] = None,
 ) -> Tensor:
     """A RNN-T loss with pruning, which uses the output of a pruned 'joiner'
     network as input, i.e. a 4 dimensions tensor with shape (B, T, s_range, C),
@@ -1199,6 +1207,7 @@ def rnnt_loss_pruned(
         termination_symbol=termination_symbol,
         boundary=boundary,
         rnnt_type=rnnt_type,
+        py_add=py_add,
     )
 
     if delay_penalty > 0.0:
